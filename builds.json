@@ -2,14 +2,19 @@
   "apps": {
     "hello": {
       "repo": "https://github.com/getbintana/bintana.git",
-      "commit": "926565e6728552e98d3eb4aa1bb34deb5cbfa3e1",
+      "commit": "829588e4189e65665e3e0d6ad6989b1e2c545a53",
       "entry": "282667cd54f4281ca0184eee2528b9db3420b329ac77fe45671ee40c15704d2c"
     },
     "project": {
       "repo": "https://github.com/getbintana/bintana-project.git",
       "commit": "40e0894c219a6370fe7d4f2cf146d89d3024b85f",
       "entry": "2d02fb8afb61904cd5327bbb815f1634872cec0f8a437f44d989ed30b830c598"
+    },
+    "ide": {
+      "repo": "https://github.com/getbintana/bintana.git",
+      "commit": "829588e4189e65665e3e0d6ad6989b1e2c545a53",
+      "entry": "dbce0b5761886d92df124b1a60502cb8b1b581f25ed8e0e306c8dafa3fae04c1"
     }
   },
-  "runtime": "926565e6728552e98d3eb4aa1bb34deb5cbfa3e1"
+  "runtime": "829588e4189e65665e3e0d6ad6989b1e2c545a53"
 }
