@@ -21,5 +21,6 @@
       "entry": "bc3a48de5faccb6cf46889bbdad8baccdd7eeb48d3c7712fca043cce7f800a96"
     }
   },
-  "runtime": "77e4662ff25fd553d72611841f4a4c9a54ea424d"
+  "runtime": "77e4662ff25fd553d72611841f4a4c9a54ea424d",
+  "build_env": "d2f11ce1b219909402c72a65c84f569f58f7b1291f212ee875fca7236c0db592"
 }
