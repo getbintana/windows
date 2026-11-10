@@ -47,7 +47,7 @@ A directory in `apps/` whose name is the application's, with one `app.json` --
 
 | | |
 |---|---|
-| `id` | the application id, which the project's `project.json` and its `<id>.metainfo.xml` also declare |
+| `id` | the application id, which the project's `project.btp` and its `<id>.metainfo.xml` also declare |
 | `repo` | where the source lives, reachable by the runner |
 | `ref` | the branch or tag to build. Absent means the default branch. A commit id is not a ref: put a tag on what you want |
 | `project` | the Bintana project inside that repository, packaged by `tools/pack.sh --nsis` |
@@ -63,28 +63,29 @@ F1 reference is in neither: it is `bintana-docs`, and without it F1 builds the
 topic from the runtime.
 
 **What the project needs** is what the packaging step asks for: an `id`, an
-`<id>.metainfo.xml` that agrees with `project.json`, and -- for the
+`<id>.metainfo.xml` that agrees with `project.btp`, and -- for the
 installer's own icon, the shortcuts' and the one in *Installed apps* --
 `icons/<id>.png`. An svg cannot be worn by NSIS: a project with only one
 builds, with the generic icon and a note in the log.
 
 ## What it rebuilds
 
-`builds.json` on `state` records the runtime's commit and one entry per
-application. On every run:
+`builds.json` on `state` records the runtime's commit, one entry per
+application, and the build environment's recipe hash. On every run:
 
 | changed | rebuilt |
 |---|---|
 | no state at all, or *Run workflow* with "everything" ticked | everything |
-| the runtime, `lib/`, the vendor, `tools/pack`, `tools/windows-portable.sh`, `CMakeLists.txt` | every application -- each installer carries its own copy of the runtime |
+| the runtime, `lib/`, the vendor, `tools/pack`, `tools/windows-portable.sh`, `CMakeLists.txt` | every application -- each installer carries its own copy of the runtime -- and the build environment when `CMakeLists.txt` moved |
 | an application's `watch` paths in the runtime's repository | it alone |
 | an application's own repository | it alone |
 | an application's registration (`app.json`) | it alone |
+| the build environment's script or `build.yml` | it alone |
 
 ## What it publishes
 
-A release named `<app>-<version>` (`project-0.2.0rc1`), the version being the
-project's own `project.json`, with
+A release named `<app>-<version>` (`project-0.3.1rc1`), the version being the
+project's own `project.btp`, with
 `<command>-<version>-windows-x86_64.exe` attached. A version with a letter in
 it is a **prerelease**, so the repository's *latest* stays on the last final
 one. A rebuild under the same version -- the runtime moved, the application did
@@ -94,13 +95,41 @@ The release is created at this repository's commit, not the application's:
 the tag names the build, and the notes say which commit of the application and
 of the runtime went into it.
 
+### The build environment
+
+One release is not an application: `build-<version>` carries
+`bintana-build-<version>-windows-x86_64.zip`, an MSYS2 UCRT64 tree with GCC,
+binutils, gdb, cmake, ninja, pkgconf, git, gettext, GTK4, GtkSourceView 5,
+sqlite3, libsoup3, libxml2 and their headers -- the environment the setups
+above are built in, for developing Bintana itself on Windows. Unzip it
+anywhere, run `bintana-build.cmd` from the directory where you keep your source
+(or `bintana-build.cmd -where C:\src`), and:
+
+```sh
+git clone https://github.com/getbintana/bintana.git
+cd bintana
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build build -j
+./build/bintana.exe ide
+```
+
+It is rebuilt when its recipe changes -- `tools/windows-build-tree.sh`,
+`build.yml` (the package list), or the runtime's `CMakeLists.txt` -- or on an
+*everything* run, and the ZIP replaces in place under the same tag. The recipe
+is hashed in `builds.json`, so a failed build is retried rather than recorded
+as done. The ZIP is Deflate so Explorer extracts it without 7-Zip.
+What is checked while it is made is that the copied tree has the compiler,
+CMake, Ninja, pkgconf, git, gettext and the two pkg-config files; the tree
+itself is unverified until somebody unzips it, the same caveat as the portable
+runtime.
+
 ## What it runs
 
 Before anything is published, every setup this run built is **installed**,
 silently (`/S`, into a directory of the run's own), and the installed tree is
 run: `bin/bintana.exe --version`, which is the DLL closure, and one console
 project, which is the runtime working out of a tree that is not the build one.
-The launcher the shortcut points at and the application's `project.json` have
+The launcher the shortcut points at and the application's `project.btp` have
 to be where the script put them. A setup that installs a program that does not
 start is not released.
 
