@@ -2,7 +2,10 @@
   "id": "io.github.getbintana.Ide",
   "project": "ide",
   "watch": [
-    "ide"
+    "ide",
+    "examples",
+    "README.md",
+    "CHANGELOG.md"
   ],
   "with": [
     "share/bintana/examples",

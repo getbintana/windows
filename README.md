@@ -56,11 +56,11 @@ A directory in `apps/` whose name is the application's, with one `app.json` --
 
 `manifest` and `finish-args` are the Flatpak's and mean nothing here. **The
 IDE is registered as the project it is** (`ide`), and carries `with` what
-makes it the portable zip's equal: the examples, the runtime's documentation
-and the bundled NSIS that *Project → Windows installer…* compiles with -- the
-same setup the runtime's own `windows` job attaches to a runtime release. The
-F1 reference is in neither: it is `bintana-docs`, and without it F1 builds the
-topic from the runtime.
+makes it the portable zip's equal: the examples, the runtime's README, CHANGELOG
+and notices, and the bundled NSIS that *Project → Windows installer…* compiles
+with -- the same setup the runtime's own `windows` job attaches to a runtime
+release. The F1 reference is in neither: it is `bintana-docs`, and without it F1
+builds the topic from the runtime.
 
 **What the project needs** is what the packaging step asks for: an `id`, an
 `<id>.metainfo.xml` that agrees with `project.btp`, and -- for the
@@ -71,58 +71,62 @@ builds, with the generic icon and a note in the log.
 ## What it rebuilds
 
 `builds.json` on `state` records the runtime's commit, one entry per
-application, and the build environment's recipe hash. On every run:
+application, the build environment's recipe hash and the MSYS2 packages every
+setup was compiled against. On every run:
 
 | changed | rebuilt |
 |---|---|
 | no state at all, or *Run workflow* with "everything" ticked | everything |
-| the runtime, `lib/`, the vendor, `tools/pack`, `tools/windows-portable.sh`, `CMakeLists.txt` | every application -- each installer carries its own copy of the runtime -- and the build environment when `CMakeLists.txt` moved |
-| an application's `watch` paths in the runtime's repository | it alone |
+| the runtime, `lib/`, the vendor, `tools/pack`, `tools/windows-portable.sh`, the licences (`tools/windows-licenses.sh`, `LICENSE`, `THIRD-PARTY-NOTICES.md`) | every application -- each installer carries its own copy of the runtime and its notices -- and the build environment when `CMakeLists.txt` moved |
+| the package list of the MSYS2 step in `build.yml` | every application -- their DLLs, their data and their licence texts are the payload's -- and the build environment |
+| an application's `watch` paths in the runtime's repository | it alone. The IDE's are `ide/` **and `examples/`, `README.md` and `CHANGELOG.md`**, which its installer carries in `with` |
 | an application's own repository | it alone |
 | an application's registration (`app.json`) | it alone |
-| the build environment's script or `build.yml` | it alone |
+| the build environment's script | it alone |
 
 ## What it publishes
 
 A release named `<app>-<version>` (`project-0.3.1rc1`), the version being the
-project's own `project.btp`, with
-`<command>-<version>-windows-x86_64.exe` attached. A version with a letter in
-it is a **prerelease**, so the repository's *latest* stays on the last final
-one. A rebuild under the same version -- the runtime moved, the application did
-not -- **replaces** the setup in that release; a new version is a new release.
+project's own `project.btp`, with `<command>-<version>-windows-x86_64.exe` and
+its `.sha256` attached. A version with a letter in it is a **prerelease**, so
+the repository's *latest* stays on the last final one. A rebuild under the same
+version -- the runtime moved, the application did not -- **replaces** the setup
+in that release; a new version is a new release.
 
 The release is created at this repository's commit, not the application's:
 the tag names the build, and the notes say which commit of the application and
-of the runtime went into it.
+of the runtime went into it -- rewritten with the setup on every rebuild, since
+the asset under the same tag is then a different build.
 
 ### The build environment
 
 One release is not an application: `build-<version>` carries
-`bintana-build-<version>-windows-x86_64.zip`, an MSYS2 UCRT64 tree with GCC,
-binutils, gdb, cmake, ninja, pkgconf, git, gettext, GTK4, GtkSourceView 5,
-sqlite3, libsoup3, libxml2, GStreamer with gst-plugins-rs (the GTK4 sink),
-poppler, and their headers -- the environment the setups above are built in,
-for developing Bintana itself on Windows. Unzip it anywhere, run
-`bintana-build.cmd` from the directory where you keep your source
-(or `bintana-build.cmd -where C:\src`), and:
+`bintana-build-<version>-windows-x86_64.zip` and its `.sha256`, an MSYS2 UCRT64
+tree with GCC, binutils, gdb, cmake, ninja, pkgconf, git, gettext, GTK4,
+GtkSourceView 5, sqlite3, libsoup3, libxml2, GStreamer with gst-plugins-rs (the
+GTK4 sink), poppler, libvterm (the Windows terminal), and their headers -- the
+environment the setups above are built in, for developing Bintana itself on
+Windows. Unzip it anywhere, run `bintana-build.cmd` from the directory where you
+keep your source (or `bintana-build.cmd -where C:\src`), and:
 
 ```sh
 git clone https://github.com/getbintana/bintana.git
 cd bintana
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build -j
-./build/bintana.exe ide
+./build/bintana-gui.exe ide
 ```
 
-It is rebuilt when its recipe changes -- `tools/windows-build-tree.sh`,
-`build.yml` (the package list), or the runtime's `CMakeLists.txt` -- or on an
+It is rebuilt when its recipe changes -- `tools/windows-build-tree.sh`, the
+package list in `build.yml`, or the runtime's `CMakeLists.txt` -- or on an
 *everything* run, and the ZIP replaces in place under the same tag. The recipe
 is hashed in `builds.json`, so a failed build is retried rather than recorded
 as done. The ZIP is Deflate so Explorer extracts it without 7-Zip.
 What is checked while it is made is that the copied tree has the compiler,
 CMake, Ninja, pkgconf, git, gettext, the two required pkg-config files, and the
-GStreamer and poppler halves the environment promises; the tree itself is
-unverified until somebody unzips it, the same caveat as the portable runtime.
+GStreamer, poppler and libvterm halves the environment promises; the tree
+itself is unverified until somebody unzips it, the same caveat as the portable
+runtime.
 
 ## What it runs
 
@@ -130,9 +134,16 @@ Before anything is published, every setup this run built is **installed**,
 silently (`/S`, into a directory of the run's own), and the installed tree is
 run: `bin/bintana.exe --version`, which is the DLL closure, and one console
 project, which is the runtime working out of a tree that is not the build one.
-The launcher the shortcut points at and the application's `project.btp` have
-to be where the script put them. A setup that installs a program that does not
-start is not released.
+Then the graphical host runs a probe of its own -- `bintana-gui.exe` starts a
+child with its output piped, and asks for `Video`, `PdfDocument.CanRead` and
+`Terminal` -- because those are the pieces a payload loses quietly: a setup
+without `lib/gstreamer-1.0` or `share/poppler` installs, launches and answers
+`false`. The licences (`share/licenses/bintana`) and the README, CHANGELOG and
+notices the application carries are checked too, as is the contributors' `docs/`
+being absent. The launcher the shortcut points at and the application's
+`project.btp` have to be where the script put them. A setup that installs a
+program that does not start -- or one whose third-party notices are missing --
+is not released.
 
 What is **not** run is the application's window: a hosted runner may have no
 desktop for it to open on, which is the same reason the runtime's own job only

@@ -14,8 +14,13 @@
 #
 #   - no state, or a run asked for everything -> every application;
 #   - the runtime, `lib/`, the vendor, the     -> every application, because
-#     packaging, the portable tree's recipe       each installer carries its
-#                                                 own copy of the runtime;
+#     packaging, the portable tree's recipe,      each installer carries its
+#     the licences                                own copy of the runtime and
+#                                                 its notices;
+#   - the MSYS2 package list in this file      -> every application: the DLLs,
+#                                                 the data and the notice texts
+#                                                 of those packages are the
+#                                                 payload's;
 #   - an application's `watch` paths, for one  -> it alone;
 #     that lives in the runtime's repository
 #   - an application's own repository          -> it alone, when its commit moved;
@@ -110,9 +115,14 @@ jobs:
           import glob, hashlib, json, os, subprocess
 
           # What every installer is made of besides the application: a change
-          # in any of these is a change in every setup.
+          # in any of these is a change in every setup. The licences are the
+          # payload's too -- a setup redistributes the DLLs, so their notices
+          # and `THIRD-PARTY-NOTICES.md` travel in `share/licenses`, and
+          # `lib/package/Nsis.js` carries that directory into every one.
           RUNTIME = ["runtime", "lib", "vendor", "CMakeLists.txt",
-                     "tools/pack", "tools/windows-portable.sh"]
+                     "tools/pack", "tools/windows-portable.sh",
+                     "tools/windows-licenses.sh",
+                     "LICENSE", "THIRD-PARTY-NOTICES.md"]
 
           path  = "state/builds.json"
           state = json.load(open(path)) if os.path.exists(path) else {}
@@ -131,21 +141,49 @@ jobs:
               diff = git("sources/bintana", "diff", "--quiet", since, "HEAD", "--", *paths)
               return diff.returncode != 0
 
-          everything = bool(os.environ.get("ALL")) or moved(state.get("runtime"), RUNTIME)
+          # The MSYS2 packages every installer is compiled against. They are
+          # an input like the source is -- a DLL and its licence land in the
+          # payload, a missing one is a feature the setup silently lacks (the
+          # terminal was one: `libvterm` arrived in the runtime's own job and
+          # not here) -- so a list that moved is a change in every setup.
+          #
+          # **The list and not the file.** A comment in this workflow is not a
+          # setup, and rebuilding four 460 MB installers for one is how a
+          # workflow stops being run when it matters. The `install:` block is
+          # the YAML block scalar under `with:` of `setup-msys2`.
+          def toolchain():
+              block, indent = [], None
+              for line in open("ci/.github/workflows/build.yml").read().splitlines():
+                  if indent is None:
+                      if line.strip().startswith("install:"):
+                          indent = len(line) - len(line.lstrip())
+                      continue
+                  if not line.strip():
+                      continue
+                  if len(line) - len(line.lstrip()) <= indent:
+                      break
+                  block.append(line.strip())
+              return hashlib.sha256("\n".join(block).encode()).hexdigest()
+
+          pkgs = toolchain()
+
+          everything = (bool(os.environ.get("ALL")) or
+                        state.get("toolchain") != pkgs or
+                        moved(state.get("runtime"), RUNTIME))
 
           # The build environment is the toolchain, not the source: its recipe
           # is its own script, the package list in this workflow, and the
           # runtime's build configuration (a new version is a new release).
           # A hash and not a commit, so a failed build is retried instead of
-          # recorded as done.
+          # recorded as done. `pkgs` and not this file, for the reason above.
           def digest(path):
               return hashlib.sha256(open(path, "rb").read()).hexdigest() \
                      if os.path.exists(path) else ""
 
-          dev_hash = hashlib.sha256("".join(digest(p) for p in [
-              "sources/bintana/tools/windows-build-tree.sh",
-              "sources/bintana/CMakeLists.txt",
-              "ci/.github/workflows/build.yml",
+          dev_hash = hashlib.sha256("".join([
+              digest("sources/bintana/tools/windows-build-tree.sh"),
+              digest("sources/bintana/CMakeLists.txt"),
+              pkgs,
           ]).encode()).hexdigest()
           dev = bool(os.environ.get("ALL")) or dev_hash != state.get("build_env")
 
@@ -168,16 +206,19 @@ jobs:
           print(" ".join(names))
           print("yes" if dev else "no")
           print(dev_hash)
+          print(pkgs)
           EOF
           mapfile -t decided < "$plan"
           rm -f "$plan"
           apps=${decided[0]:-}
           dev=${decided[1]:-no}
           dev_hash=${decided[2]:-}
+          pkgs=${decided[3]:-}
           echo "decided: apps=${apps:-none} build-env=$dev"
           echo "apps=$apps" >> "$GITHUB_OUTPUT"
           echo "dev=$dev" >> "$GITHUB_OUTPUT"
           echo "dev_hash=$dev_hash" >> "$GITHUB_OUTPUT"
+          echo "toolchain=$pkgs" >> "$GITHUB_OUTPUT"
 
           # And what each one carries of the runtime tree besides the runtime
           # (`with`), one path a line: the MSYS2 steps have no python to read
@@ -215,6 +256,7 @@ jobs:
             mingw-w64-ucrt-x86_64-gst-libav
             mingw-w64-ucrt-x86_64-gst-plugins-rs
             mingw-w64-ucrt-x86_64-poppler
+            mingw-w64-ucrt-x86_64-libvterm
             mingw-w64-ucrt-x86_64-toolchain
             mingw-w64-ucrt-x86_64-make
             git
@@ -313,7 +355,13 @@ jobs:
               BINTANA="$root/stage/runtime/bin/bintana.exe" \
                   sources/bintana/tools/pack.sh --nsis "$src" "$root/stage/apps/$name" \
                       --prefix "$root/stage/runtime" "${extra[@]}"
-              ls -l "$root"/stage/apps/"$name"/*-windows-x86_64.exe
+              setup=$(ls "$root"/stage/apps/"$name"/*-windows-x86_64.exe)
+              # The checksum the release carries, computed here, in the shell
+              # that has the MSYS2 hashers. A bare name inside, so a reader in
+              # their download directory is `sha256sum -c` and no editor.
+              ( cd "$(dirname "$setup")" && sha256sum "$(basename "$setup")" \
+                    > "$(basename "$setup").sha256" )
+              ls -l "$setup" "$setup.sha256"
           done
 
       # What was just built, installed and run -- before anything is
@@ -326,17 +374,32 @@ jobs:
       # Flatpak repository runs: a `main` project never initialises GTK, so it
       # needs no desktop, and its `Decimal` is the vendored arithmetic patch
       # answering from inside the installed tree. And the application's own
-      # project has to be where the shortcut points, and `bintanaw.exe` -- what
-      # the shortcut starts -- has to be a GUI executable, or the application
-      # opens with a console behind it.
+      # project has to be where the shortcut points, and `bintana-gui.exe` --
+      # what the shortcut starts -- has to be a GUI executable, or the
+      # application opens with a console behind it.
+      #
+      # **The questions only the installed tree can answer.** `Video` is the
+      # GStreamer registry's sink and `PdfDocument.CanRead` is poppler's build
+      # flag; a setup that lost `lib/gstreamer-1.0`, `share/gstreamer-1.0` or
+      # `share/poppler` installed and launched and answered false for both
+      # (`docs/agents/packaging.md`, measured on Windows 11). `Terminal` is
+      # `libvterm`'s, and false from a tree built without the package. The
+      # probe runs in the graphical host -- `Widget` is not installed for a
+      # `main` under `bintana.exe` -- and writes its answers to a file, because
+      # a GUI executable's `print` is not seen from a shell.
+      #
+      # **And the licences.** The payload carries `share/licenses` (Bintana's,
+      # QuickJS's and the MSYS2 packages' texts), which is what makes
+      # redistributing the DLLs beside them legal; a setup that lost it ships
+      # binaries whose notices nobody has.
       #
       # **On a clean machine's PATH.** This shell has `/ucrt64/bin` on its
       # PATH, which holds every DLL and helper the tree should carry, so a run
       # here would find a missing one there and pass -- GLib's spawn helpers
       # went missing exactly like that. The installed tree is run with only
-      # Windows' own directories, by both executables, and the smoke project
-      # starts a child with its output piped, which is what goes through the
-      # helper: `bintana.exe` uses the `-console` one, `bintanaw.exe` the other.
+      # Windows' own directories, by both executables, and both projects start
+      # a child with its output piped, which is what goes through the helper:
+      # `bintana.exe` uses the `-console` one, `bintana-gui.exe` the other.
       #
       # `MSYS2_ARG_CONV_EXCL`: MSYS2 rewrites an argument that looks like a
       # path, and `/S` looks like one.
@@ -364,6 +427,32 @@ jobs:
           }
           EOF
 
+          probe=$(mktemp -d)
+          cat > "$probe/project.btp" <<'EOF'
+          {
+              "name": "probe",
+              "main": "Main",
+              "sources": ["Main.js"]
+          }
+          EOF
+          cat > "$probe/Main.js" <<'EOF'
+          function Main() {
+              /* A throw is a line in the answer file and not a dialog waiting
+               * on a click nobody will make. */
+              Application.OnError = (e) => {
+                  File.Save(File.Join(Application.Directory, "answer.txt"), "error=" + e + "\n");
+                  Application.Quit(1);
+              };
+              const child = Exec.Wait([Application.Executable, "--version"]);
+              File.Save(File.Join(Application.Directory, "answer.txt"),
+                        "exec=" + child.ExitCode + "\n" +
+                        "video=" + Widget.Available("Video") + "\n" +
+                        "pdf=" + PdfDocument.CanRead + "\n" +
+                        "terminal=" + Widget.Available("Terminal") + "\n");
+              Application.Quit(child.ExitCode === 0 ? 0 : 1);
+          }
+          EOF
+
           clean="/c/Windows/System32:/c/Windows"
           for name in ${{ steps.plan.outputs.apps }}; do
               setup=$(ls stage/apps/"$name"/*-windows-x86_64.exe)
@@ -378,7 +467,16 @@ jobs:
               test -f "$into/bin/$cmd.cmd"
               test -f "$into/share/bintana/apps/$cmd/project.btp"
               test -f "$into/Uninstall.exe"
-              objdump -p "$into/bin/bintanaw.exe" | grep -q 'Windows GUI'
+              # The two hosts and the helper keep their subsystems: what a
+              # shortcut starts is the GUI one, and `bintana-exec.exe` is GUI
+              # so that a console tool an application runs has no window of
+              # its own -- the core is console, which `--version` wants.
+              objdump -p "$into/bin/bintana-gui.exe" | grep -q 'Windows GUI' \
+                  || { echo "$name: bintana-gui.exe is not a GUI executable" >&2; exit 1; }
+              objdump -p "$into/bin/bintana.exe" | grep -q 'Windows CUI' \
+                  || { echo "$name: bintana.exe is not a console executable" >&2; exit 1; }
+              objdump -p "$into/bin/bintana-exec.exe" | grep -q 'Windows GUI' \
+                  || { echo "$name: bintana-exec.exe is not a GUI executable" >&2; exit 1; }
               # Adwaita inherits AdwaitaLegacy, where its full-colour icons are.
               for theme in Adwaita AdwaitaLegacy hicolor; do
                   test -f "$into/share/icons/$theme/index.theme" \
@@ -388,20 +486,49 @@ jobs:
                   [ -z "$path" ] || test -e "$into/$path" \
                       || { echo "$name: installed without $path" >&2; exit 1; }
               done < "with/$name"
-              # GTK imports vulkan-1.dll at load time and the SVG loader
-              # imports librsvg-2-2.dll: neither is Windows' own, and the
-              # runner's System32 has a Vulkan loader, so a setup missing one
-              # still runs here and fails on a machine whose driver ships none.
-              for dll in vulkan-1.dll librsvg-2-2.dll; do
+              # `share/doc/bintana` is README, CHANGELOG and the notices now,
+              # and never the contributors' `docs/` (the notes, the plans, the
+              # audit), which is for whoever works on the runtime.
+              # `tests/install` asks `cmake --install` the same question.
+              if grep -qx 'share/doc/bintana' "with/$name"; then
+                  for doc in README.md CHANGELOG.md; do
+                      test -f "$into/share/doc/bintana/$doc" \
+                          || { echo "$name: installed without share/doc/bintana/$doc" >&2; exit 1; }
+                  done
+                  [ ! -d "$into/share/doc/bintana/docs" ] \
+                      || { echo "$name: installed the contributors' docs/ beside the release" >&2; exit 1; }
+              fi
+              # The DLLs a setup redistributes carry their notices: Bintana's,
+              # QuickJS's (the engine is embedded) and the MSYS2 packages'
+              # texts `tools/windows-licenses.sh` copies.
+              for file in LICENSE-Bintana LICENSE-QuickJS THIRD-PARTY-NOTICES.md \
+                          MSYS2-PACKAGES.md; do
+                  test -f "$into/share/licenses/bintana/$file" \
+                      || { echo "$name: installed without share/licenses/bintana/$file" >&2; exit 1; }
+              done
+              # GTK imports vulkan-1.dll at load time, the SVG loader imports
+              # librsvg-2-2.dll and the graphical host imports libvterm-0.dll:
+              # none is Windows' own, and the runner's System32 has a Vulkan
+              # loader, so a setup missing one still runs here and fails on a
+              # machine whose driver ships none.
+              for dll in vulkan-1.dll librsvg-2-2.dll libvterm-0.dll; do
                   test -f "$into/bin/$dll" \
                       || { echo "$name: installed without $dll" >&2; exit 1; }
               done
               PATH="$clean" "$into/bin/bintana.exe" --version
               PATH="$clean" "$into/bin/bintana.exe" "$smoke"
-              # No console, so nothing it prints is seen: the exit code is the
-              # answer, and it is the IDE's own Run, helper and all.
-              PATH="$clean" "$into/bin/bintanaw.exe" "$smoke" \
-                  || { echo "$name: bintanaw.exe could not run the smoke" >&2; exit 1; }
+              # No console, so nothing the graphical host prints is seen: its
+              # answers go to a file, and the exit code says whether it ran.
+              rm -f "$probe/answer.txt"
+              PATH="$clean" "$into/bin/bintana-gui.exe" "$probe" \
+                  || { cat "$probe/answer.txt" 2>/dev/null || true
+                       echo "$name: bintana-gui.exe could not run the probe" >&2; exit 1; }
+              answers=$(cat "$probe/answer.txt")
+              echo "$answers"
+              for want in 'exec=0' 'video=true' 'pdf=true' 'terminal=true'; do
+                  grep -qx "$want" <<<"$answers" \
+                      || { echo "$name: the installed tree did not answer $want" >&2; exit 1; }
+              done
           done
 
       # A release per application version, the setup attached to it. A version
@@ -419,12 +546,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          TOOLCHAIN: ${{ steps.plan.outputs.toolchain }}
         run: |
           set -euo pipefail
           for name in ${{ steps.plan.outputs.apps }}; do
               setup=$(ls stage/apps/"$name"/*-windows-x86_64.exe)
               entry="ci/apps/$name/app.json"
-              read -r src commit < <(python - "$name" "$entry" <<'EOF'
+              # `tr -d '\r'`: the runner's python is a Windows one, and its
+              # `print` ends the line `\r\n` -- which the shell keeps, so the
+              # body of a release came out with a carriage return before the
+              # closing backtick (see the published ones). The same fix the
+              # plan step carries.
+              read -r src commit < <(python - "$name" "$entry" <<'EOF' | tr -d '\r'
           import json, subprocess, sys
           name, entry = sys.argv[1], sys.argv[2]
           app = json.load(open(entry))
@@ -433,21 +566,26 @@ jobs:
           print(f"{src}/{app['project']} {commit}")
           EOF
               )
-              title=$(python -c 'import json,sys;print(json.load(open(sys.argv[1]))["name"])' "$src/project.btp")
-              version=$(python -c 'import json,sys;print(json.load(open(sys.argv[1])).get("version","0.0"))' "$src/project.btp")
+              title=$(python -c 'import json,sys;print(json.load(open(sys.argv[1]))["name"])' "$src/project.btp" | tr -d '\r')
+              version=$(python -c 'import json,sys;print(json.load(open(sys.argv[1])).get("version","0.0"))' "$src/project.btp" | tr -d '\r')
               tag="$name-$version"
               runtime=$(git -C sources/bintana rev-parse HEAD)
-              repo=$(python -c 'import json,sys;print(json.load(open(sys.argv[1])).get("repo","https://github.com/getbintana/bintana"))' "$entry")
+              repo=$(python -c 'import json,sys;print(json.load(open(sys.argv[1])).get("repo","https://github.com/getbintana/bintana"))' "$entry" | tr -d '\r')
+              notes="$title $version for Windows (x86_64): built from ${repo%.git} at \`$commit\`, on the runtime getbintana/bintana at \`$runtime\`."
 
               pre=""
               [[ $version =~ [A-Za-z] ]] && pre="--prerelease"
 
               if ! gh release view "$tag" >/dev/null 2>&1; then
                   gh release create "$tag" --target "$GITHUB_SHA" $pre \
-                      --title "$title $version" \
-                      --notes "$title $version for Windows (x86_64): built from ${repo%.git} at \`$commit\`, on the runtime getbintana/bintana at \`$runtime\`."
+                      --title "$title $version" --notes "$notes"
               fi
-              gh release upload "$tag" "$setup" --clobber
+              gh release upload "$tag" "$setup" "$setup.sha256" --clobber
+              # The setup is replaced in place under the same tag, so the body
+              # has to be replaced with it: left alone it names the commit of
+              # the first publish that created the release, not the one the
+              # asset under it was built from.
+              gh release edit "$tag" --notes "$notes"
               echo "== $name: $(basename "$setup") in $tag"
           done
 
@@ -463,6 +601,10 @@ jobs:
                   ["git", "-C", where, "rev-parse", "HEAD"], text=True).strip()
 
           state["runtime"] = commit("sources/bintana")
+          # What every setup was compiled against, recorded with them: the
+          # package list is not in the runtime's history, so this is the only
+          # place the plan can see it from.
+          state["toolchain"] = os.environ["TOOLCHAIN"]
           bintana = "https://github.com/getbintana/bintana.git"
           for name in sys.argv[1:]:
               entry = f"ci/apps/{name}/app.json"
@@ -509,7 +651,8 @@ jobs:
           size=$(stat -c %s "$name.zip")
           [ "$size" -lt 2000000000 ] \
               || { echo "build environment: $size bytes is over GitHub's 2 GB asset limit" >&2; exit 1; }
-          ls -lh "$name.zip"
+          sha256sum "$name.zip" > "$name.zip.sha256"
+          ls -lh "$name.zip" "$name.zip.sha256"
 
       # A release of its own, `build-<version>`: the same rule as the setups,
       # a rebuild under the same version replaces the ZIP in place, and a
@@ -528,12 +671,15 @@ jobs:
           pre=""
           [[ $version =~ [A-Za-z] ]] && pre="--prerelease"
           runtime=$(git -C sources/bintana rev-parse HEAD)
+          notes="The MSYS2 UCRT64 environment Bintana is built with on Windows (x86_64): GCC, binutils, gdb, cmake, ninja, pkgconf, git, gettext, GTK4, GtkSourceView 5, sqlite3, libsoup3, libxml2, GStreamer with gst-plugins-rs (the GTK4 sink), poppler and libvterm, headers included. Unzip it, run \`bintana-build.cmd\`, and build getbintana/bintana at \`$runtime\`."
           if ! gh release view "$tag" >/dev/null 2>&1; then
               gh release create "$tag" --target "$GITHUB_SHA" --latest=false $pre \
-                  --title "Bintana build $version for Windows" \
-                  --notes "The MSYS2 UCRT64 environment Bintana is built with on Windows (x86_64): GCC, binutils, gdb, cmake, ninja, pkgconf, git, gettext, GTK4, GtkSourceView 5, sqlite3, libsoup3 and libxml2, headers included. Unzip it, run \`bintana-build.cmd\`, and build getbintana/bintana at \`$runtime\`."
+                  --title "Bintana build $version for Windows" --notes "$notes"
           fi
-          gh release upload "$tag" "$zip" --clobber
+          gh release upload "$tag" "$zip" "$zip.sha256" --clobber
+          # The recipe changed and the ZIP was replaced under the same tag: the
+          # body names the commit the tree is from, so it is rewritten with it.
+          gh release edit "$tag" --notes "$notes"
           echo "== build: $(basename "$zip") in $tag"
 
       # And the state, after the upload: a failed ZIP is rebuilt next time,
